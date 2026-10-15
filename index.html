@@ -27,6 +27,26 @@
     -webkit-user-drag: none;
   }
   #pic[hidden] { display: none; }
+  #frame {
+    position: fixed; left: 0; top: 0;
+    outline: 2px dashed #2a7fff; outline-offset: 0;
+    pointer-events: none;
+  }
+  .h {
+    position: absolute; width: 48px; height: 48px;
+    margin: -24px 0 0 -24px;
+    pointer-events: auto; touch-action: none;
+  }
+  .h::after {
+    content: ""; position: absolute; left: 13px; top: 13px;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #fff; border: 3px solid #2a7fff;
+    box-sizing: border-box;
+  }
+  .h[data-c="tl"] { left: 0; top: 0; }
+  .h[data-c="tr"] { left: 100%; top: 0; }
+  .h[data-c="bl"] { left: 0; top: 100%; }
+  .h[data-c="br"] { left: 100%; top: 100%; }
   button {
     font: inherit; font-size: 17px; font-weight: 600;
     border: 0; border-radius: 999px; cursor: pointer;
@@ -55,6 +75,10 @@
 </head>
 <body>
 <div id="stage"><img id="pic" alt="" hidden draggable="false"></div>
+<div id="frame" hidden>
+  <div class="h" data-c="tl"></div><div class="h" data-c="tr"></div>
+  <div class="h" data-c="bl"></div><div class="h" data-c="br"></div>
+</div>
 
 <button id="add">Add picture</button>
 <div id="bar" hidden>
@@ -75,12 +99,28 @@
   // Picture position: x, y = top-left in px; s = scale.
   let st = { src: null, x: 0, y: 0, s: 1, locked: false };
 
+  const frame = $('frame');
+  let resizing = false;
+
   function apply() {
     pic.style.transform = `translate(${st.x}px, ${st.y}px) scale(${st.s})`;
+    if (resizing) {
+      frame.style.transform = `translate(${st.x}px, ${st.y}px)`;
+      frame.style.width = pic.naturalWidth * st.s + 'px';
+      frame.style.height = pic.naturalHeight * st.s + 'px';
+    }
+  }
+
+  function setResizing(on) { resizing = on; frame.hidden = !on; apply(); }
+
+  function onPic(x, y) {
+    return x >= st.x && y >= st.y &&
+      x <= st.x + pic.naturalWidth * st.s && y <= st.y + pic.naturalHeight * st.s;
   }
 
   function render() {
     const has = !!st.src;
+    if (!has || st.locked) setResizing(false);
     pic.hidden = !has;
     add.hidden = has;
     bar.hidden = !has || st.locked;
@@ -123,7 +163,7 @@
     const r = new FileReader();
     r.onload = () => {
       st.src = r.result;
-      pic.onload = () => { centerFit(); render(); save(); };
+      pic.onload = () => { centerFit(); setResizing(false); render(); save(); };
       pic.src = st.src;
     };
     r.readAsDataURL(f);
@@ -132,6 +172,8 @@
   // ---- Drag with one finger, pinch with two ----
   const pts = new Map();
   let start = null;
+  let lastTap = { t: 0, x: 0, y: 0 };
+  let tap = null; // where the current single touch began, to tell taps from drags
 
   function snapshot() {
     const p = [...pts.values()];
@@ -150,6 +192,20 @@
     stage.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pts.size <= 2) start = snapshot();
+    if (pts.size === 1) {
+      tap = { x: e.clientX, y: e.clientY };
+      // Double tap on the picture: show or hide the resize corners.
+      const now = performance.now();
+      if (now - lastTap.t < 350 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 40 &&
+          onPic(e.clientX, e.clientY)) {
+        setResizing(!resizing);
+        lastTap.t = 0;
+      } else {
+        lastTap = { t: now, x: e.clientX, y: e.clientY };
+      }
+    } else {
+      tap = null;
+    }
   });
 
   stage.addEventListener('pointermove', (e) => {
@@ -175,11 +231,48 @@
 
   function up(e) {
     if (!pts.delete(e.pointerId)) return;
+    // A plain tap off the picture closes the resize corners.
+    if (resizing && tap && !pts.size &&
+        Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 8 && !onPic(e.clientX, e.clientY)) {
+      setResizing(false);
+    }
+    tap = null;
     start = pts.size ? snapshot() : null;
     if (!pts.size) save();
   }
   stage.addEventListener('pointerup', up);
   stage.addEventListener('pointercancel', up);
+
+  // Corner handles: drag to resize, the opposite corner stays put.
+  frame.querySelectorAll('.h').forEach((h) => {
+    const c = h.dataset.c;
+    const left = c[1] === 'l', topSide = c[0] === 't';
+    let g = null;
+    h.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+      h.setPointerCapture(e.pointerId);
+      const iw = pic.naturalWidth, ih = pic.naturalHeight;
+      g = {
+        id: e.pointerId, iw, ih,
+        ax: left ? st.x + iw * st.s : st.x,   // anchor = opposite corner
+        ay: topSide ? st.y + ih * st.s : st.y,
+      };
+    });
+    h.addEventListener('pointermove', (e) => {
+      if (!g || e.pointerId !== g.id) return;
+      const dx = (left ? g.ax - e.clientX : e.clientX - g.ax);
+      const dy = (topSide ? g.ay - e.clientY : e.clientY - g.ay);
+      // Project the finger onto the picture's diagonal so it keeps its shape.
+      const s = Math.max((dx * g.iw + dy * g.ih) / (g.iw * g.iw + g.ih * g.ih), 24 / Math.max(g.iw, g.ih));
+      st.s = s;
+      st.x = left ? g.ax - g.iw * s : g.ax;
+      st.y = topSide ? g.ay - g.ih * s : g.ay;
+      apply();
+    });
+    const end = (e) => { if (g && e.pointerId === g.id) { g = null; save(); } };
+    h.addEventListener('pointerup', end);
+    h.addEventListener('pointercancel', end);
+  });
 
   // Mouse wheel / trackpad zoom on a laptop.
   stage.addEventListener('wheel', (e) => {
