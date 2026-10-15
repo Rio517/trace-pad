@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#ffffff">
+<title>Trace Pad</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #fff;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #stage { position: fixed; inset: 0; background: #fff; }
+  #pic {
+    position: absolute; left: 0; top: 0;
+    transform-origin: 0 0;
+    max-width: none;
+    pointer-events: none;
+    -webkit-user-drag: none;
+  }
+  #pic[hidden] { display: none; }
+  button {
+    font: inherit; font-size: 17px; font-weight: 600;
+    border: 0; border-radius: 999px; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #add {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    padding: 20px 36px; font-size: 22px;
+    background: #111; color: #fff;
+  }
+  #bar {
+    position: fixed; top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right));
+    display: flex; gap: 8px;
+  }
+  #bar button, #unlock {
+    padding: 10px 16px; background: rgba(0,0,0,.06); color: #222;
+  }
+  #bar button:active, #unlock:active { background: rgba(0,0,0,.14); }
+  #unlock {
+    position: fixed; bottom: max(12px, env(safe-area-inset-bottom)); right: max(12px, env(safe-area-inset-right));
+    font-size: 14px; padding: 8px 14px; color: #999; background: rgba(0,0,0,.03);
+  }
+  [hidden] { display: none !important; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<div id="stage"><img id="pic" alt="" hidden draggable="false"></div>
+
+<button id="add">Add picture</button>
+<div id="bar" hidden>
+  <button id="change">Change</button>
+  <button id="full">Full screen</button>
+  <button id="lock">Lock</button>
+</div>
+<button id="unlock" hidden>Unlock</button>
+<input id="file" type="file" accept="image/*">
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const stage = $('stage'), pic = $('pic'), file = $('file');
+  const add = $('add'), bar = $('bar'), unlockBtn = $('unlock');
+  const KEY = 'trace-pad-v1';
+
+  // Picture position: x, y = top-left in px; s = scale.
+  let st = { src: null, x: 0, y: 0, s: 1, locked: false };
+
+  function apply() {
+    pic.style.transform = `translate(${st.x}px, ${st.y}px) scale(${st.s})`;
+  }
+
+  function render() {
+    const has = !!st.src;
+    pic.hidden = !has;
+    add.hidden = has;
+    bar.hidden = !has || st.locked;
+    unlockBtn.hidden = !has || !st.locked;
+    $('full').hidden = !canFullscreen();
+    apply();
+  }
+
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(st)); }
+    catch (e) {
+      // Picture too big to remember; keep the spot only.
+      try { localStorage.setItem(KEY, JSON.stringify({ ...st, src: null })); } catch (_) {}
+    }
+  }
+
+  function load() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+      if (saved && saved.src) st = saved;
+    } catch (_) {}
+  }
+
+  function centerFit() {
+    const w = innerWidth, h = innerHeight;
+    const iw = pic.naturalWidth, ih = pic.naturalHeight;
+    st.s = Math.min((w * 0.8) / iw, (h * 0.8) / ih);
+    st.x = (w - iw * st.s) / 2;
+    st.y = (h - ih * st.s) / 2;
+  }
+
+  // ---- Picture loading ----
+  add.onclick = () => file.click();
+  $('change').onclick = () => file.click();
+
+  file.onchange = () => {
+    const f = file.files && file.files[0];
+    file.value = '';
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      st.src = r.result;
+      pic.onload = () => { centerFit(); render(); save(); };
+      pic.src = st.src;
+    };
+    r.readAsDataURL(f);
+  };
+
+  // ---- Drag with one finger, pinch with two ----
+  const pts = new Map();
+  let start = null;
+
+  function snapshot() {
+    const p = [...pts.values()];
+    if (p.length === 1) return { mode: 'drag', px: p[0].x, py: p[0].y, x: st.x, y: st.y };
+    const [a, b] = p;
+    return {
+      mode: 'pinch',
+      cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2,
+      d: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      x: st.x, y: st.y, s: st.s,
+    };
+  }
+
+  stage.addEventListener('pointerdown', (e) => {
+    if (!st.src || st.locked) return;
+    stage.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size <= 2) start = snapshot();
+  });
+
+  stage.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId) || !start) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const p = [...pts.values()];
+    if (start.mode === 'drag' && p.length === 1) {
+      st.x = start.x + (p[0].x - start.px);
+      st.y = start.y + (p[0].y - start.py);
+    } else if (start.mode === 'pinch' && p.length >= 2) {
+      const [a, b] = p;
+      const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+      const k = Math.hypot(a.x - b.x, a.y - b.y) / start.d;
+      const s = Math.min(Math.max(start.s * k, 0.05), 40);
+      const r = s / start.s;
+      // Keep the point under the fingers fixed while scaling.
+      st.s = s;
+      st.x = cx - (start.cx - start.x) * r;
+      st.y = cy - (start.cy - start.y) * r;
+    }
+    apply();
+  });
+
+  function up(e) {
+    if (!pts.delete(e.pointerId)) return;
+    start = pts.size ? snapshot() : null;
+    if (!pts.size) save();
+  }
+  stage.addEventListener('pointerup', up);
+  stage.addEventListener('pointercancel', up);
+
+  // Mouse wheel / trackpad zoom on a laptop.
+  stage.addEventListener('wheel', (e) => {
+    if (!st.src || st.locked) return;
+    e.preventDefault();
+    const r = Math.exp(-e.deltaY * 0.002);
+    const s = Math.min(Math.max(st.s * r, 0.05), 40);
+    const k = s / st.s;
+    st.x = e.clientX - (e.clientX - st.x) * k;
+    st.y = e.clientY - (e.clientY - st.y) * k;
+    st.s = s;
+    apply(); save();
+  }, { passive: false });
+
+  // Stop iOS page zoom gestures.
+  ['gesturestart', 'gesturechange'].forEach((t) =>
+    document.addEventListener(t, (e) => e.preventDefault()));
+
+  // ---- Lock ----
+  $('lock').onclick = () => { st.locked = true; render(); save(); };
+  unlockBtn.onclick = () => { st.locked = false; render(); save(); };
+
+  // ---- Full screen ----
+  function canFullscreen() {
+    const el = document.documentElement;
+    return !!(el.requestFullscreen || el.webkitRequestFullscreen);
+  }
+  function isFull() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }
+  $('full').onclick = () => {
+    const el = document.documentElement;
+    if (isFull()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+  };
+  function onFull() { $('full').textContent = isFull() ? 'Exit full screen' : 'Full screen'; }
+  document.addEventListener('fullscreenchange', onFull);
+  document.addEventListener('webkitfullscreenchange', onFull);
+
+  // ---- Keep the screen awake ----
+  let wake = null;
+  async function keepAwake() {
+    try {
+      if ('wakeLock' in navigator && document.visibilityState === 'visible' && !wake) {
+        wake = await navigator.wakeLock.request('screen');
+        wake.addEventListener('release', () => { wake = null; });
+      }
+    } catch (_) {}
+  }
+  document.addEventListener('visibilitychange', keepAwake);
+  document.addEventListener('pointerdown', keepAwake);
+  keepAwake();
+
+  // ---- Start ----
+  load();
+  if (st.src) {
+    pic.onload = render;
+    pic.src = st.src;
+  }
+  render();
+})();
+</script>
+</body>
+</html>
